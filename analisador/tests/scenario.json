@@ -1,0 +1,46 @@
+{
+  "inputs": {},
+  "db2": {
+    "CUSTOMER": [
+      {
+        "ID": "7",
+        "STATUS": "B"
+      },
+      {
+        "ID": "8",
+        "STATUS": "A"
+      }
+    ]
+  },
+  "files": {
+    "CUSTOMER_FILE": [
+      {
+        "key": "7",
+        "NAME": "ANA"
+      }
+    ],
+    "APP.IN": [
+      "B",
+      "A"
+    ]
+  },
+  "ims": {
+    "CUSTDB": [
+      {
+        "_segment": "CUSTOMER",
+        "ID": "7",
+        "NAME": "ANA"
+      }
+    ]
+  },
+  "mq": {},
+  "screens": {
+    "MAINMAP": {
+      "fields": {
+        "CUSTOMER_ID": "7",
+        "TITLE": "HACK"
+      },
+      "aid": "ENTER"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Saídas e material do cliente (análises de programas, cenários, relatórios): ficam fora do repositório público
+/analises/
+/cenarios/
+/_descartados/
+/Claude outputs/
+/analisador/example-run/
+/analisador/tools/gen_cenarios_qal_real.py
+/analisador/tools/gen_cenarios_qal_real_expected.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline-analise"
+version = "1.0.0"
+description = "Pipeline da análise mainframe: das fontes COBOL aos relatórios das fases 0 a 22, com a IA (Claude CLI ou Kiro CLI) executando os prompts sem intervenção humana"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6"]
+
+[project.scripts]
+pipeline-analise = "pipeline_analise.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

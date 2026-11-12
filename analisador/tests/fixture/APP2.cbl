@@ -1,0 +1,16 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. APP2.
+       PROCEDURE DIVISION.
+           IF STATUS = 'B'
+              MOVE 'N' TO APPROVAL
+              MOVE 'DECISIONS' TO QNAME
+              CALL 'MQOPEN' USING QNAME
+              CALL 'MQPUT' USING QNAME APPROVAL
+              MOVE 'GU' TO IMSFUNC
+              MOVE 'CUSTDB' TO IMSDB
+              MOVE 'CUSTOMER(ID=7)' TO SSA
+              CALL 'CBLTDLI' USING IMSFUNC IMSDB SSA IMSREC
+              MOVE CUSTOMER_ID TO FILEKEY
+              READ CUSTOMER_FILE KEY IS FILEKEY INTO FILEREC
+           END-IF.
+           GOBACK.

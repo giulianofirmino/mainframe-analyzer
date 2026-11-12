@@ -1,0 +1,25 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. VALID01.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01  WRK-OK                  PIC X(01) VALUE 'N'.
+           EXEC SQL INCLUDE MISSDCL END-EXEC.
+       LINKAGE SECTION.
+       01  DFHCOMMAREA.
+           COPY MISSCPY.
+       PROCEDURE DIVISION.
+       0000-PRINCIPAL SECTION.
+           IF MISSCPY-STATUS EQUAL SPACES
+              MOVE 'S' TO WRK-OK
+           END-IF
+           IF MISSCPY-QTD EQUAL ZEROS
+              MOVE 'Z' TO MISSCPY-RESULTADO
+           END-IF
+           IF MISSCPY-ATIVO
+              ADD 1 TO MISSCPY-CONT
+           END-IF
+           EXEC SQL
+                SELECT K_NOME INTO :MISSDCL.K-NOME FROM DB2PRD.TK
+                 WHERE K_ID = :MISSDCL.K-ID
+           END-EXEC
+           EXEC CICS RETURN END-EXEC.

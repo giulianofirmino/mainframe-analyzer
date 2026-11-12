@@ -1,0 +1,883 @@
+"""Desenha o modelo de relatório (report_model) em HTML com SVG, sem dependências.
+
+O modelo é a única fonte: o HTML (humano) e o JSON (ia/report.json) mostram exatamente o mesmo conteúdo.
+Blocos: text, table, bars (barras empilhadas), bands (faixas: uma unidade por linha, células por coluna), graph (kind: layered | er | flowchart; nó com inactive=true fica cinza tracejado; nó com mocked=true fica com fundo laranja claro).
+"""
+import html
+import re
+import json
+from pathlib import Path
+from urllib.parse import quote
+
+from cores import (COR_CLASSE, COR_SQL_LE, COR_SQL_GRAVA, COR_REGRA, COR_VALIDACAO, COR_DERIVACAO, COR_SUCESSO, COR_ERRO, COR_ROTEAMENTO)
+
+PALETA = ['#0072B2', '#E69F00', '#009E73', '#CC79A7', '#56B4E9', '#D55E00', '#5E7C16', '#7f7f7f']
+# Cores fixas por classe de programa em todos os relatórios (borda colorida, fundo branco); o restante usa a paleta sem essas cores.
+_ALIAS = {'COORDENADORES': 'COORDENADOR', 'FUNCIONAIS': 'FUNCIONAL', 'CORPORATIVOS': 'CORPORATIVO', 'FRAMEWORK': 'INFRAESTRUTURA', 'FRAMEWORKS': 'INFRAESTRUTURA', 'NEGOCIO': 'FUNCIONAL'}
+# Tipos de regra (fase 6): cores básicas bem distintas entre si.
+COR_TIPO = {'consulta estática (internalizada)': COR_SQL_LE, 'funcionalidade corporativa': COR_CLASSE['CORPORATIVO'], 'validação': COR_VALIDACAO, 'tratamento de erro': COR_ERRO, 'retorno de sucesso': COR_SUCESSO,
+            'consulta de dados': COR_SQL_LE, 'alteração de estado': COR_SQL_GRAVA, 'roteamento': COR_ROTEAMENTO, 'derivação': COR_DERIVACAO, **COR_REGRA}
+PALETA_OUTROS = ['#7f7f7f', '#CC79A7', '#8c564b', '#bcbd22', '#e377c2', '#5E7C16', '#455A64', '#B26A00']
+
+
+def _colors(names):
+    """nome -> cor: classes de programa têm cor fixa; os demais grupos recebem cores da paleta restante, em ordem."""
+    out, k = {}, 0
+    for n in dict.fromkeys(names):
+        c = COR_CLASSE.get(_ALIAS.get(str(n).upper(), str(n).upper())) or COR_TIPO.get(str(n))
+        if c is None:
+            c = PALETA_OUTROS[k % len(PALETA_OUTROS)]
+            k += 1
+        out[n] = c
+    return out
+CSS = """
+.wire{border:1px solid var(--line);border-radius:8px;padding:10px;background:var(--card);margin:6px 0 4px}.wgrid{display:grid;gap:6px;margin:4px 0}.wn{display:flex;flex-direction:column;gap:2px;padding:5px 7px;border:1px dashed var(--line);border-radius:6px;background:var(--bg);min-width:0}.wn.wi{border:2px solid #0072B2}.wn.wo{border:2px solid #1E8E3E}.wn.wr{border-style:solid}.wl{font-weight:600;font-size:12px}.wbox{border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:12px;color:var(--mut);background:var(--card)}.wbtn{display:inline-block;border:1px solid var(--acc);color:var(--acc);border-radius:14px;padding:2px 12px;font-weight:600;font-size:12px}.wtxt{font-size:12px}.wmeta{font:10.5px ui-monospace,Consolas,monospace;color:var(--mut);word-break:break-all}.wact{color:#EF6C00}.wsel{display:inline-block;font-size:10.5px;background:#E8EAF6;color:#1a237e;border-radius:4px;padding:1px 5px;margin-top:2px}.wbox2{border:1px solid var(--line);border-radius:6px;padding:6px;margin:4px 0}.wtt{font-weight:700;font-size:12px;margin-bottom:3px}.wlist{border:2px solid #1E8E3E;border-radius:6px;padding:6px;margin:4px 0;background:var(--bg)}.wcols{display:flex;gap:6px;flex-wrap:wrap}.wcol{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:4px;padding:3px 6px;min-width:90px;max-width:230px}
+div.sql{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--card);border:1px solid var(--line);border-left:5px solid #009E73;border-radius:6px;padding:10px 14px;margin:8px 0 14px;overflow-x:auto;white-space:pre;tab-size:4}
+div.sql.w{border-left-color:#CC79A7}.sk{color:var(--acc);font-weight:700}.sh{color:#D55E00}.sl{color:#117733}
+tr.mk td{background:#EAF3FB}
+:root{--bg:#fff;--fg:#1c1c1c;--mut:#666;--line:#d0d0d0;--card:#f6f7f9;--acc:#0072B2}
+@media (prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e6e6e6;--mut:#9aa0a6;--line:#3a3d42;--card:#20232a;--acc:#56B4E9}}
+body{font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--fg)}
+main{max-width:1280px;margin:0 auto;padding:24px 20px 60px;box-sizing:border-box}h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 8px;border-top:1px solid var(--line);padding-top:16px}
+h3{font-size:15px;margin:20px 0 6px}.sub{color:var(--mut);margin:0 0 16px}.cards{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 14px;min-width:120px}.card b{display:block;font-size:20px}.card span{color:var(--mut);font-size:12px}
+table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}th{background:var(--card);position:sticky;top:0}
+.tw{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:6px}.tw table{margin:0}
+.svgw{overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--card);padding:6px;margin:8px 0}
+svg text{fill:var(--fg);font:11px system-ui,sans-serif}svg .mut{fill:var(--mut)}svg .box{fill:var(--bg);stroke:var(--line)}svg .edge{fill:none;stroke:var(--mut);stroke-opacity:.55}
+.legend{display:flex;flex-wrap:wrap;gap:12px;margin:4px 0;font-size:12px}.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;box-sizing:border-box}
+body{display:flex;align-items:flex-start}#idx{position:sticky;top:0;height:100vh;flex:0 0 auto;width:var(--w,270px);min-width:170px;max-width:60vw;overflow:auto;background:var(--card);border-right:1px solid var(--line);padding:12px 12px 24px;font-size:13px;box-sizing:border-box}#idx h4{margin:14px 0 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}#idx h4:first-child{margin-top:0}#idx a{display:block;padding:3px 6px;color:var(--acc);text-decoration:none;border-radius:4px;overflow-wrap:anywhere}#idx a:hover{background:var(--bg)}#idx a.cur{font-weight:600;background:var(--bg)}span.tag{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;color:var(--mut);margin:0 0 6px}#idx .off{display:block;padding:3px 6px;color:var(--mut)}#idx .sec a{padding-left:16px;font-size:12px}#rz{flex:0 0 5px;align-self:stretch;cursor:col-resize;background:var(--line);opacity:.6}#rz:hover,#rz.on{background:var(--acc);opacity:1}#tg{position:fixed;left:6px;bottom:6px;z-index:9;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:12px}body.nonav #idx,body.nonav #rz{display:none}main{flex:1 1 0;min-width:0}@media(max-width:800px){#idx,#rz{display:none}body.shownav #idx{display:block;position:fixed;z-index:8;width:80vw}}details{margin:12px 0}summary{cursor:pointer;color:var(--acc)}pre{white-space:pre-wrap;background:var(--card);padding:10px;border-radius:6px;overflow:auto;font-size:12px}
+label.tgd{display:block;margin:6px 0;font-size:13px;cursor:pointer}.hide-dn .dn{display:none}.svcomp{display:none}.hide-dn .svcomp{display:block}.hide-dn .svfull{display:none}svg .ina rect,svg .ina polygon,svg .ina circle{stroke:#999!important;stroke-dasharray:5 3;fill:var(--bg);opacity:.55}svg .ina text{fill:#8a8a8a}svg path.edge.ina{stroke:#999;stroke-dasharray:5 3;opacity:.55}.legend i.ina{background:none;border:1px dashed #999;box-sizing:border-box}
+svg .cdash text{fill:#7a7a7a}svg .dashbox{fill:none;stroke:#8a8a8a;stroke-width:1;stroke-dasharray:4 3}.legend i.cdash{background:none;border:1px dashed #8a8a8a}svg .cna text{fill:#b3261e;text-decoration:line-through}svg .cna text.mut{fill:#b3261e}svg .mck rect,svg .mck polygon,svg .mck circle{fill:#fff3b0!important}svg .mck text{fill:#1c1c1c}.legend i.cna{background:none;border:1px solid #b3261e;box-sizing:border-box}.legend i.mck{background:#fff3b0;border:1px solid #999;box-sizing:border-box}code{background:var(--card);padding:0 4px;border-radius:3px}.note{color:var(--mut);font-size:12px}
+"""
+
+
+def esc(x):
+    return html.escape(str(x))
+
+
+def _cut(s, n):
+    s = str(s)
+    return s if len(s) <= n else s[:n - 1] + '…'
+
+
+def table(b):
+    cols = b['columns']
+    head = ''.join(f'<th>{esc(c)}</th>' for c in cols)
+    ids = b.get('row_ids') or []
+    marks = b.get('row_marks') or []
+    dn = b.get('row_descartada') or []
+    def _cls(i):
+        c = (['mk'] if i < len(marks) and marks[i] else []) + (['dn'] if i < len(dn) and dn[i] else [])
+        return f' class="{" ".join(c)}">' if c else '>'
+    body = ''.join((f'<tr id="{esc(ids[i])}"' if i < len(ids) and ids[i] else '<tr')
+                   + _cls(i) + ''.join(f'<td>{cell(v)}</td>' for v in r) + '</tr>' for i, r in enumerate(b['rows']))
+    return f'<div class="tw"><table><tr>{head}</tr>{body}</table></div>' + (f'<p class="note">{esc(b["note"])}</p>' if b.get('note') else '')
+
+
+def readable(v):
+    """Texto humano para qualquer valor: dict -> 'chave=valor; ...', lista -> 'a, b, c' (nunca JSON)."""
+    if v is None:
+        return ''
+    if isinstance(v, dict) and 'text' in v and 'links' in v:
+        return readable(v['text']) + (' — ver: ' if v['text'] else '') + ', '.join(readable(x['text']) for x in v['links'])
+    if isinstance(v, dict):
+        return '; '.join(f'{k}={readable(x)}' for k, x in v.items())
+    if isinstance(v, (list, tuple, set)):
+        return ', '.join(readable(x) for x in v)
+    if isinstance(v, bool):
+        return 'sim' if v else 'não'
+    return str(v)
+
+
+_PHASE = ['']
+
+
+def href(l):
+    """Endereço de um link do modelo: mesma fase = âncora na própria página; outra fase = a página dela, ao lado nas pastas de saída."""
+    return ('#' if l['phase'] == _PHASE[0] else f'../../{quote(l["phase"])}/human/report.html#') + str(l['anchor'])
+
+
+def cell(v):
+    if isinstance(v, dict) and 'parts' in v:   # texto com referências cruzadas no meio (ligar): pedaços de texto e links
+        return ''.join(f'<a href="{esc(href(p))}">{esc(p["text"])}</a>' if isinstance(p, dict) else esc(p) for p in v['parts'])
+    if isinstance(v, dict) and 'text' in v and 'links' in v:
+        return esc(readable(v['text'])) + (' — ver: ' if v['links'] and v['text'] else '') + ', '.join(f'<a href="{esc(href(l))}">{esc(l["text"])}</a>' for l in v['links'])
+    return esc(readable(v))
+
+
+def bars(b):
+    series = b['series']  # [{label, parts:[{name,value}]}]
+    names = list(dict.fromkeys(list(b.get('names') or []) + [p['name'] for s in series for p in s['parts']]))   # 'names' fixa a ordem (e a cor) quando vários gráficos mostram as mesmas categorias
+    mx = max([sum(p['value'] for p in s['parts']) for s in series] + [1])
+    W, lab, rowh = 620, 220, 22
+    h = len(series) * rowh + 8
+    out = [f'<svg width="{lab + W + 90}" height="{h}" role="img" aria-label="{esc(b.get("title", ""))}">']
+    for i, s in enumerate(series):
+        y = 4 + i * rowh
+        out.append(f'<text x="{lab - 8}" y="{y + 13}" text-anchor="end">{esc(_cut(s["label"], 34))}</text>')
+        x = lab
+        for p in s['parts']:
+            w = W * p['value'] / mx
+            if w > 0:
+                c = _colors(names)[p['name']]
+                out.append(f'<rect x="{x:.1f}" y="{y}" width="{w:.1f}" height="16" fill="{c}"><title>{esc(s["label"])} — {esc(p["name"])}: {p["value"]}</title></rect>')
+                x += w
+        tot = sum(p['value'] for p in s['parts'])
+        out.append(f'<text x="{x + 6:.1f}" y="{y + 13}" class="mut">{tot if not s.get("suffix") else esc(s["suffix"])}</text>')
+    out.append('</svg>')
+    leg = ''.join(f'<span><i style="background:{_colors(names)[n]}"></i>{esc(n)}</span>' for n in names)
+    return f'<div class="svgw">{"".join(out)}</div><div class="legend">{leg}</div>'
+
+
+def _layers(nodes, edges):
+    ids = [n['id'] for n in nodes]
+    out, inn = {i: [] for i in ids}, {i: 0 for i in ids}
+    for e in edges:
+        if e['from'] in out and e['to'] in out and e['from'] != e['to']:
+            out[e['from']].append(e['to'])
+            inn[e['to']] += 1
+    depth = {}
+    roots = [i for i in ids if inn[i] == 0] or ids[:1]
+    stack = [(r, 0, ()) for r in roots]
+    while stack:
+        n, d, path = stack.pop()
+        if n in path:
+            continue
+        if depth.get(n, -1) >= d:
+            continue
+        depth[n] = d
+        for m in out[n]:
+            stack.append((m, d + 1, path + (n,)))
+    for i in ids:
+        depth.setdefault(i, 0)
+    return depth
+
+
+def layered(b):
+    nodes, edges = b['nodes'], b['edges']
+    depth = _layers(nodes, edges)
+    groups = list(dict.fromkeys(n.get('group', '') for n in nodes))
+    byl = {}
+    for n in nodes:
+        byl.setdefault(depth[n['id']], []).append(n)
+    nw, nh, gx, gy = 236, 24, 84, 8
+    pos = {}
+    for d, ns in byl.items():
+        for k, n in enumerate(ns):
+            pos[n['id']] = (10 + d * (nw + gx), 10 + k * (nh + gy))
+    W = 20 + (max(byl) + 1) * (nw + gx)
+    H = 20 + max(len(v) for v in byl.values()) * (nh + gy)
+    out = [f'<svg width="{W}" height="{H}" role="img" aria-label="{esc(b.get("title", ""))}"><defs><marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#888"/></marker></defs>']
+    for e in edges:
+        if e['from'] in pos and e['to'] in pos:
+            x1, y1 = pos[e['from']][0] + nw, pos[e['from']][1] + nh / 2
+            x2, y2 = pos[e['to']][0], pos[e['to']][1] + nh / 2
+            dx = max(30, abs(x2 - x1) / 2)
+            out.append(f'<path class="edge{" ina" if e.get("inactive") else ""}" d="M{x1},{y1} C{x1 + dx},{y1} {x2 - dx},{y2} {x2},{y2}" marker-end="url(#ar)"><title>{esc(e.get("label", ""))}</title></path>')
+            if b.get('edge_labels') and e.get('label'):
+                out.append(f'<text class="mut" x="{x1 + (x2 - x1) * 0.12 + 4:.1f}" y="{y1 + (y2 - y1) * 0.12 - 3:.1f}">{esc(_cut(e["label"], 30))}</text>')
+    for n in nodes:
+        x, y = pos[n['id']]
+        c = _colors(groups)[n.get('group', '')]
+        out.append(f'<g{_cls(n)}><rect class="box" x="{x}" y="{y}" width="{nw}" height="{nh}" rx="5" style="stroke:{c};stroke-width:1.6"/>'
+                   f'<text x="{x + 7}" y="{y + 16}">{esc(_cut(n["label"], 28))}</text><title>{esc(n.get("detail") or n["label"])}</title></g>')
+    out.append('</svg>')
+    return f'<div class="svgw">{"".join(out)}</div>' + _legend(groups, b)
+
+
+def _cls(n):
+    return ' class="ina"' if n.get('inactive') else ' class="mck"' if n.get('mocked') else ''
+
+
+def _legend(groups, b):
+    leg = ''.join(f'<span><i style="background:{_colors(groups)[g]}"></i>{esc(g)}</span>' for g in groups if g)
+    if b.get('inactive_label') and (any(n.get('inactive') for n in b['nodes']) or any(e.get('inactive') for e in b.get('edges', []))):
+        leg += f'<span><i class="ina"></i>{esc(b["inactive_label"])}</span>'
+    if b.get('dashed_label') and any(c.get('dashed') for n in b['nodes'] for c in n.get('columns') or []):
+        leg += f'<span><i class="cdash"></i>{esc(b["dashed_label"])}</span>'
+    if b.get('column_label') and any(c.get('inactive') for n in b['nodes'] for c in n.get('columns') or []):
+        leg += f'<span><i class="cna"></i>{esc(b["column_label"])}</span>'
+    if b.get('mocked_label') and any(n.get('mocked') for n in b['nodes']):
+        leg += f'<span><i class="mck"></i>{esc(b["mocked_label"])}</span>'
+    return f'<div class="legend">{leg}</div>' if leg else ''
+
+
+def _wrap(text, width=30, maxlines=6):
+    parts = str(text).split('\n')
+    if len(parts) > 1:
+        lines = [x for part in parts for x in _wrap(part, width, 99)]
+        return lines if len(lines) <= maxlines else lines[:maxlines - 1] + [lines[maxlines - 1][:width - 1] + '…']
+    words, lines, cur = str(text).split(), [], ''
+    for w in words:
+        while len(w) > width:
+            if cur:
+                lines.append(cur)
+                cur = ''
+            lines.append(w[:width])
+            w = w[width:]
+        if len(cur) + len(w) + (1 if cur else 0) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + ' ' + w).strip()
+    if cur:
+        lines.append(cur)
+    if len(lines) > maxlines:
+        lines = lines[:maxlines - 1] + [lines[maxlines - 1][:width - 1] + '…']
+    return lines or ['']
+
+
+def flowchart(b):
+    """Fluxograma de cima para baixo: losango = decisão, retângulo = consequência, pílula = início/fim, círculo = junção."""
+    nodes, edges = b['nodes'], b['edges']
+    depth = _layers(nodes, edges)
+    groups = list(dict.fromkeys(n.get('group', '') for n in nodes if n.get('group')))
+    size = {}
+    for n in nodes:
+        sh = n.get('shape', 'action')
+        lines = _wrap(n['label'], {'action': 44, 'decision': 34}.get(sh, 40), {'action': 400, 'decision': 400}.get(sh, 2))
+        n['_lines'] = lines
+        pill = max(120, 7 * max(len(x) for x in lines) + 24)
+        size[n['id']] = {'start': (pill, 26), 'end': (pill, 26), 'join': (12, 12), 'decision': (max(330, 7 * max(len(x) for x in lines) + 90), 34 + 13 * len(lines))}.get(sh, (max(250, 7 * max(len(x) for x in lines) + 20), 12 + 13 * len(lines)))
+    camadas = {}
+    for n in nodes:
+        camadas.setdefault(depth[n['id']], []).append(n)
+    parents = {}
+    for e in edges:
+        parents.setdefault(e['to'], []).append(e['from'])
+    xc, gap = {}, 24
+    widths, layers = {}, {}
+    limite = b.get('largura_max')   # opcional: camada mais larga que isso quebra em linhas (nada fica fora da tela)
+    for d in sorted(camadas):
+        ns = camadas[d]
+        if d > 0:
+            ns.sort(key=lambda n: sum(xc.get(p, 0) for p in parents.get(n['id'], [])) / max(1, len(parents.get(n['id'], []))))
+        linhas, atual, larg = [], [], 0
+        for n in ns:
+            w = size[n['id']][0]
+            if limite and atual and larg + gap + w > limite:
+                linhas.append(atual)
+                atual, larg = [], 0
+            larg += (gap if atual else 0) + w
+            atual.append(n)
+        linhas.append(atual)
+        for k, linha in enumerate(linhas):
+            layers[(d, k)] = linha
+            widths[(d, k)] = sum(size[n['id']][0] for n in linha) + gap * (len(linha) - 1)
+            x = 0
+            for n in linha:
+                xc[n['id']] = x + size[n['id']][0] / 2
+                x += size[n['id']][0] + gap
+    W = max(widths.values()) + 40
+    y, yy = 12, {}
+    for d in sorted(layers):
+        for n in layers[d]:
+            xc[n['id']] += 20 + (max(widths.values()) - widths[d]) / 2
+        h = max(size[n['id']][1] for n in layers[d])
+        for n in layers[d]:
+            yy[n['id']] = y + (h - size[n['id']][1]) / 2
+        y += h + 46
+    H = y
+    out = [f'<svg width="{W:.0f}" height="{H:.0f}" role="img" aria-label="{esc(b.get("title", ""))}"><defs><marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#888"/></marker></defs>']
+    for e in edges:
+        if e['from'] in xc and e['to'] in xc and e['from'] != e['to']:
+            x1, y1 = xc[e['from']], yy[e['from']] + size[e['from']][1]
+            x2, y2 = xc[e['to']], yy[e['to']]
+            dy = max(18, abs(y2 - y1) / 2)
+            out.append(f'<path class="edge" d="M{x1:.1f},{y1:.1f} C{x1:.1f},{y1 + dy:.1f} {x2:.1f},{y2 - dy:.1f} {x2:.1f},{y2:.1f}" marker-end="url(#ar)"/>')
+            if e.get('label'):
+                out.append(f'<text class="mut" x="{(x1 * 0.7 + x2 * 0.3) + 4:.1f}" y="{y1 + 13:.1f}">{esc(_cut(e["label"], 22))}</text>')
+    for n in nodes:
+        w, h = size[n['id']]
+        x, y0 = xc[n['id']] - w / 2, yy[n['id']]
+        c = _colors(groups)[n['group']] if n.get('group') in groups else '#888'
+        sh = n.get('shape', 'action')
+        fundo = f';fill:{c};fill-opacity:.22' if n.get('group') in groups else ''
+        if sh == 'decision':
+            k = 18
+            shp = f'<polygon points="{x + k:.1f},{y0:.1f} {x + w - k:.1f},{y0:.1f} {x + w:.1f},{y0 + h / 2:.1f} {x + w - k:.1f},{y0 + h:.1f} {x + k:.1f},{y0 + h:.1f} {x:.1f},{y0 + h / 2:.1f}" class="box" style="stroke:{c};stroke-width:1.6{fundo}"/>'
+        elif sh == 'join':
+            shp = f'<circle cx="{x + 6:.1f}" cy="{y0 + 6:.1f}" r="5" fill="{c}" opacity=".5"/>'
+        else:
+            shp = f'<rect class="box" x="{x:.1f}" y="{y0:.1f}" width="{w}" height="{h}" rx="{13 if sh in ("start", "end") else 5}" style="stroke:{c};stroke-width:1.6{fundo}"/>'
+        tx = ''
+        if sh != 'join':
+            top = y0 + (h - 13 * len(n['_lines'])) / 2 + 10
+            anchor = 'start' if sh == 'action' else 'middle'
+            px = x + 7 if sh == 'action' else x + w / 2
+            tx = ''.join(f'<text text-anchor="{anchor}" x="{px:.1f}" y="{top + 13 * i:.1f}">{esc(l)}</text>' for i, l in enumerate(n['_lines']))
+        out.append(f'<g{_cls(n)}>{shp}{tx}<title>{esc(n.get("detail") or n["label"])}</title></g>')
+    out.append('</svg>')
+    return f'<div class="svgw">{"".join(out)}</div>' + _legend(groups, b)
+
+
+def er_io(b):
+    """Diagrama de entrada e saída: copybooks de entrada (side='left') à esquerda do programa, o programa no meio e os de saída (side='right') à direita; seta da entrada para o
+    programa e do programa para a saída. Campo 'dashed' = tracejado."""
+    ents = [n for n in b['nodes'] if n.get('columns') is not None]
+    prog = [n for n in b['nodes'] if n.get('columns') is None]
+    left = [n for n in ents if n.get('side') != 'right']
+    right = [n for n in ents if n.get('side') == 'right']
+    bw, rowh, gap, pw = 270, 14, 22, 170
+    groups = list(dict.fromkeys(n.get('group', '') for n in b['nodes'] if n.get('group')))
+    color = lambda n: _colors(groups)[n['group']] if n.get('group') in groups else PALETA[0]
+    hh = lambda n: 24 + rowh * len(n['columns']) + 6
+
+    def coluna(lst, x):
+        y, out = 10, {}
+        for n in lst:
+            out[n['id']] = (x, y, bw, hh(n))
+            y += hh(n) + gap
+        return out, y
+    xl, xp = 10, 10 + bw + 90
+    xr = xp + pw + 90
+    pl, yl = coluna(left, xl)
+    pr, yr = coluna(right, xr)
+    H = max(yl, yr, 60)
+    pos = {**pl, **pr}
+    for k, n in enumerate(prog):
+        pos[n['id']] = (xp, max(10, H / 2 - 20 + k * 50), pw, 40)
+    W = xr + bw + 10
+    out = [f'<svg width="{W}" height="{H + 10}" role="img" aria-label="{esc(b.get("title", ""))}"><defs><marker id="ar" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#888"/></marker></defs>']
+    for e in b['edges']:
+        if e['from'] in pos and e['to'] in pos:
+            a, c = pos[e['from']], pos[e['to']]
+            if a[0] < c[0]:
+                x1, x2 = a[0] + a[2], c[0]
+            else:
+                x1, x2 = a[0], c[0] + c[2]
+            y1, y2 = a[1] + a[3] / 2, c[1] + c[3] / 2
+            dx = (x2 - x1) / 2
+            out.append(f'<path class="edge" d="M{x1},{y1} C{x1 + dx},{y1} {x2 - dx},{y2} {x2},{y2}" marker-end="url(#ar)"><title>{esc(e.get("label", ""))}</title></path>')
+    for n in prog:
+        x, y, w, h = pos[n['id']]
+        out.append(f'<g{_cls(n)}><rect class="box" x="{x}" y="{y}" width="{w}" height="{h}" rx="6" style="stroke:{color(n)};stroke-width:2"/><text x="{x + w / 2}" y="{y + 24}" text-anchor="middle" style="font-weight:600">{esc(_cut(n["label"], 22))}</text><title>{esc(n.get("detail") or n["label"])}</title></g>')
+    for n in ents:
+        x, y, w, h = pos[n['id']]
+        out.append(f'<g{_cls(n)}><rect class="box" x="{x}" y="{y}" width="{w}" height="{h}" rx="6" style="stroke:{color(n)};stroke-width:1.6"/>'
+                   f'<rect x="{x}" y="{y}" width="{w}" height="20" rx="6" fill="{color(n)}" opacity=".18"/><text x="{x + 8}" y="{y + 14}" style="font-weight:600">{esc(_cut(n["label"], 40))}</text><title>{esc(n.get("detail") or n["label"])}</title>')
+        for i, c in enumerate(n['columns']):
+            yy = y + 34 + i * rowh
+            if c.get('dashed'):
+                out.append(f'<rect class="dashbox" x="{x + 3}" y="{yy - 12}" width="{w - 6}" height="{rowh}" rx="3"/>')
+            gcl = ' class="cdash"' if c.get('dashed') else ''
+            out.append(f'<g{gcl}><text x="{x + 8}" y="{yy}">{esc(_cut(c["name"], 30))}</text><text class="mut" x="{x + w - 8}" y="{yy}" text-anchor="end">{esc(_cut(c.get("type", ""), 16))}</text></g>')
+        out.append('</g>')
+    out.append('</svg>')
+    return f'<div class="svgw">{"".join(out)}</div>' + _legend(groups, b)
+
+
+def er(b):
+    if any(n.get('side') for n in b['nodes']):
+        return er_io(b)
+    ents = [n for n in b['nodes'] if n.get('columns') is not None]
+    plain = [n for n in b['nodes'] if n.get('columns') is None]
+    bw, per_row, rowh, cap = 250, b.get('per_row', 3), 14, b.get('cap', 16)
+    px = 10
+    ex0 = 190 if plain else 10
+    groups = list(dict.fromkeys(n.get('group', '') for n in b['nodes'] if n.get('group')))
+    color = lambda n: _colors(groups)[n['group']] if n.get('group') in groups else PALETA[0]
+    pos = {}
+    for k, n in enumerate(plain):
+        pos[n['id']] = (px, 10 + k * 30, 160, 24)
+    ey = 10
+    rowmax = 0
+    out = []
+    for k, n in enumerate(ents):
+        col = k % per_row
+        if col == 0 and k:
+            ey += rowmax + 30
+            rowmax = 0
+        cols = n['columns']
+        hh = 24 + rowh * (min(len(cols), cap) + (1 if len(cols) > cap else 0)) + 6
+        pos[n['id']] = (ex0 + col * (bw + 60), ey, bw, hh)
+        rowmax = max(rowmax, hh)
+    W = ex0 + per_row * (bw + 60) + 10
+    H = max(ey + rowmax + 20, 20 + len(plain) * 30)
+    out.append(f'<svg width="{W}" height="{H}" role="img" aria-label="{esc(b.get("title", ""))}">')
+    for e in b['edges']:
+        if e['from'] in pos and e['to'] in pos:
+            a, c = pos[e['from']], pos[e['to']]
+            x1, y1 = a[0] + a[2] / 2, a[1] + a[3] / 2
+            x2, y2 = c[0] + c[2] / 2, c[1] + c[3] / 2
+            out.append(f'<line class="edge" x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}"><title>{esc(e.get("label", ""))}</title></line>')
+    for n in plain:
+        x, y, w, h = pos[n['id']]
+        out.append(f'<g{_cls(n)}><rect class="box" x="{x}" y="{y}" width="{w}" height="{h}" rx="5" style="stroke:{color(n)};stroke-width:1.6"/><text x="{x + 7}" y="{y + 16}">{esc(_cut(n["label"], 24))}</text><title>{esc(n.get("detail") or n["label"])}</title></g>')
+    for n in ents:
+        x, y, w, h = pos[n['id']]
+        out.append(f'<g{_cls(n)}><rect class="box" x="{x}" y="{y}" width="{w}" height="{h}" rx="6" style="stroke:{color(n)};stroke-width:1.6"/>'
+                   f'<rect x="{x}" y="{y}" width="{w}" height="20" rx="6" fill="{color(n)}" opacity=".18"/><text x="{x + 8}" y="{y + 14}" style="font-weight:600">{esc(_cut(n["label"], 36))}</text>')
+        for i, c in enumerate(n['columns'][:cap]):
+            key = c.get('key')
+            ci = ' class="cna"' if c.get('inactive') else (' class="cdash"' if c.get('dashed') else '')
+            if c.get('dashed'):
+                out.append(f'<rect class="dashbox" x="{x + 3}" y="{y + 34 + i * rowh - 12}" width="{w - 6}" height="{rowh}" rx="3"/>')
+            out.append(f'<g{ci}><text x="{x + 8}" y="{y + 34 + i * rowh}">{"🔑 " if key else ""}{"✕ " if c.get("inactive") else ""}{esc(_cut(c["name"], 26))}</text>'
+                       f'<text class="mut" x="{x + w - 8}" y="{y + 34 + i * rowh}" text-anchor="end">{esc(_cut(c.get("type", ""), 16))}</text></g>')
+        if len(n['columns']) > cap:
+            out.append(f'<text class="mut" x="{x + 8}" y="{y + 34 + cap * rowh}">… +{len(n["columns"]) - cap} colunas</text>')
+        out.append('</g>')
+    out.append('</svg>')
+    return f'<div class="svgw">{"".join(out)}</div>' + _legend(groups, b)
+
+
+def _quebra(t, larg):
+    import textwrap
+    return textwrap.wrap(str(t), max(8, int(larg / 6.8))) if t else []
+
+
+def bands(b):
+    """Diagrama em faixas: cada linha do bloco é uma unidade (rótulo + células por coluna, em ordem de execução da esquerda para a direita).
+    b = {'columns':[{'name','width','color'}], 'rows':[{'cells':[[linhas de texto]...]}], 'arrows': n colunas ligadas por seta}."""
+    cols = b['columns']
+    x0, gap, y = 8, 8, 8
+    xs, x = [], x0
+    for c in cols:
+        xs.append(x)
+        x += c['width'] + gap
+    o = [f'<svg viewBox="0 0 {x:.0f} {{H}}" role="img" aria-label="{esc(b.get("title", ""))}" style="width:100%;height:auto;font:11px system-ui,sans-serif">',
+         '<defs><marker id="seta" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#888"/></marker></defs>']
+    for c, xx in zip(cols, xs):
+        o.append(f'<text x="{xx + c["width"] / 2:.0f}" y="{y + 10}" text-anchor="middle" font-weight="600">{esc(c["name"])}</text>')
+    y += 20
+    for r in b['rows']:
+        linhas = [[l for parte in cel for l in _quebra(parte, c['width'] - 12)] for cel, c in zip(r['cells'], cols)]
+        h = max(34, 14 * max(len(ls) for ls in linhas) + 12)
+        for k, c in enumerate(cols):
+            ls = linhas[k]
+            if k == 0:
+                o.append(f'<rect x="{xs[k]}" y="{y}" width="{c["width"]}" height="{h}" rx="5" fill="var(--card)" stroke="var(--fg)"/>')
+            elif ls:
+                o.append(f'<rect x="{xs[k]}" y="{y}" width="{c["width"]}" height="{h}" rx="5" fill="{c["color"]}" fill-opacity="0.22" stroke="{c["color"]}"/>')
+            else:
+                o.append(f'<rect x="{xs[k]}" y="{y}" width="{c["width"]}" height="{h}" rx="5" fill="none" stroke="var(--line)" stroke-dasharray="3 3"/>')
+            for j, t in enumerate(ls):
+                fw = ' font-weight="600"' if k == 0 and j == 0 else ''
+                o.append(f'<text x="{xs[k] + 6}" y="{y + 15 + 14 * j}"{fw}>{esc(t)}</text>')
+            if not ls and k:
+                o.append(f'<text x="{xs[k] + c["width"] / 2:.0f}" y="{y + h / 2 + 4:.0f}" text-anchor="middle" class="mut">—</text>')
+        for k in range(0, min(b.get('arrows', 0), len(cols) - 1)):
+            o.append(f'<line x1="{xs[k] + cols[k]["width"]}" y1="{y + h / 2:.0f}" x2="{xs[k + 1]}" y2="{y + h / 2:.0f}" stroke="#888" stroke-width="1.4" marker-end="url(#seta)"/>')
+        y += h + 8
+    o.append('</svg>')
+    return f'<div class="svgw">{"".join(o).replace("{H}", f"{y:.0f}")}</div>' + (f'<p class="note">{esc(b["note"])}</p>' if b.get('note') else '')
+
+
+def _colunas_svg(b, nodes, edges, mid='ar'):
+    """Diagrama em colunas (graph kind 'colunas'): cada nó tem 'col' (0..n-1); b['columns'] = [{'name','color'}] dá o título e a cor fixa da borda de cada coluna;
+    as arestas ligam colunas vizinhas. A ordem dos nós em cada coluna é a ordem da lista (o script já a deixa na ordem que menos cruza as ligações)."""
+    cols = b['columns']
+    nw, nh, gx, gy, top = b.get('nw', 210), (46 if any(n.get('sub2') for n in nodes) else 34), 90, 8, 26
+    cl, cs = int(nw / 6.6), int(nw / 6.1)
+    por = [[n for n in nodes if n.get('col') == k] for k in range(len(cols))]
+    H = top + 10 + max([len(v) for v in por] + [1]) * (nh + gy)
+    W = 20 + len(cols) * nw + (len(cols) - 1) * gx
+    pos = {}
+    for k, ns in enumerate(por):
+        for i, n in enumerate(ns):
+            pos[n['id']] = (10 + k * (nw + gx), top + (i + 0.5) * (H - top - 10) / len(ns) - nh / 2)
+    o = [f'<svg width="{W}" height="{H}" role="img" aria-label="{esc(b.get("title", ""))}"><defs><marker id="{mid}" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 z" fill="#888"/></marker></defs>']
+    for k, c in enumerate(cols):
+        o.append(f'<text x="{10 + k * (nw + gx) + nw / 2:.0f}" y="16" text-anchor="middle" font-weight="600" style="fill:{c["color"]}">{esc(c["name"])}</text>')
+    for e in b['edges']:
+        if e['from'] in pos and e['to'] in pos:
+            x1, y1 = pos[e['from']][0] + nw, pos[e['from']][1] + nh / 2
+            x2, y2 = pos[e['to']][0], pos[e['to']][1] + nh / 2
+            dx = (x2 - x1) / 2
+            nd = ' dn' if any(n.get('inactive') for n in nodes if n['id'] in (e['from'], e['to'])) else ''
+            o.append(f'<path class="edge{" ina" if e.get("guarda") else ""}{nd}" d="M{x1:.1f},{y1:.1f} C{x1 + dx:.1f},{y1:.1f} {x2 - dx:.1f},{y2:.1f} {x2:.1f},{y2:.1f}" marker-end="url(#{mid})"/>')
+    for n in nodes:
+        x, y = pos[n['id']]
+        c = n.get('cor') or cols[n['col']]['color']
+        sub = f'<text class="mut" x="{x + 7:.0f}" y="{y + 28:.0f}">{esc(_cut(n["sub"], cs))}</text>' if n.get('sub') else ''
+        sub += f'<text class="mut" x="{x + 7:.0f}" y="{y + 41:.0f}" font-style="italic">{esc(_cut(n["sub2"], cs))}</text>' if n.get('sub2') else ''
+        gcls = ' class="ina dn"' if n.get('inactive') else ''
+        o.append(f'<g{gcls}><rect class="box" x="{x:.0f}" y="{y:.0f}" width="{nw}" height="{nh}" rx="5" style="stroke:{c};stroke-width:2"/>'
+                 f'<text x="{x + 7:.0f}" y="{y + (14 if sub else 21):.0f}" font-weight="600">{esc(_cut(n["label"], cl))}</text>{sub}<title>{esc(n.get("detail") or n["label"])}</title></g>')
+    o.append('</svg>')
+    return f'<div class="svgw">{"".join(o)}</div>'
+
+
+def _legenda_colunas(b):
+    """Legenda de cores do diagrama em colunas (b['legenda'] = [{'texto','cor'} | {'texto','inativo':True}]); a entrada de inativo só aparece se há nó em cinza. Quadrado com a cor da borda do nó."""
+    itens = []
+    for x in b.get('legenda') or []:
+        if x.get('inativo'):
+            if any(n.get('inactive') for n in b['nodes']):
+                itens.append(f'<span><i class="ina"></i>{esc(x["texto"])}</span>')
+        else:
+            itens.append(f'<span><i style="background:none;border:2px solid {x["cor"]}"></i>{esc(x["texto"])}</span>')
+    return f'<div class="legend">{"".join(itens)}</div>' if itens else ''
+
+
+def colunas(b):
+    """Diagrama em colunas com checkbox "Mostrar descartados": são desenhados dois diagramas, o completo e o refeito só com os nós ativos (ordem e posições recalculadas), e o checkbox alterna entre eles."""
+    nodes, edges = b['nodes'], b['edges']
+    if not any(n.get('inactive') for n in nodes):
+        return _legenda_colunas(b) + _colunas_svg(b, nodes, edges)
+    ativos = [n for n in nodes if not n.get('inactive')]
+    ids = {n['id'] for n in ativos}
+    rot = b.get('toggle_label') or 'Mostrar descartados (decisões, regras e linhas da tabela em cinza)'
+    tg = '' if b.get('sem_toggle') else ('<label class="tgd"><input type="checkbox" checked onchange="this.closest(\'.secb\').classList.toggle(\'hide-dn\',!this.checked)"> ' + esc(rot) + '</label>')
+    return (_legenda_colunas(b) + tg + '<div class="svfull">' + _colunas_svg(b, nodes, edges) + '</div><div class="svcomp">'
+            + _colunas_svg(b, ativos, [e for e in edges if e['from'] in ids and e['to'] in ids], 'ar2') + '</div>')
+
+
+_SQL_KW = ('SELECT','DISTINCT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','LIKE','BETWEEN','ORDER','BY','GROUP','HAVING','INSERT','INTO','VALUES','UPDATE','SET','DELETE','JOIN','INNER','LEFT','RIGHT','OUTER','ON','AS','WITH','UR','CS','FETCH','FIRST','ROWS','ONLY','ASC','DESC','COUNT','MAX','MIN','SUM','AVG','EXISTS','UNION','ALL','CASE','WHEN','THEN','ELSE','END','CURRENT','DATE','TIMESTAMP')
+_SQL_RE = re.compile(r"('(?:[^']|'')*')|(:[A-Za-z][\w\-]*)|(\b\d+(?:\.\d+)?\b)|(\b[A-Za-z_][\w]*\b)")
+
+
+def _sql_html(t):
+    def sub(m):
+        if m.group(1):
+            return f'<span class="sl">{esc(m.group(1))}</span>'
+        if m.group(2):
+            return f'<span class="sh">{esc(m.group(2))}</span>'
+        if m.group(3):
+            return f'<span class="sl">{m.group(3)}</span>'
+        w = m.group(4)
+        return f'<span class="sk">{w}</span>' if w.upper() in _SQL_KW else esc(w)
+    out, pos = [], 0
+    for m in _SQL_RE.finditer(t):
+        out += [esc(t[pos:m.start()]), sub(m)]
+        pos = m.end()
+    return ''.join(out) + esc(t[pos:])
+
+
+def wire(b):
+    """Wireframe de uma tela (disposição dos componentes visuais): árvore {tipo, id, rotulo, liga, acao, direcao, colunas, relacionado, filhos}; grades de layout viram colunas;
+    cada campo mostra o rótulo, a ligação com o bean e, quando existe, a relação com o campo da transação mainframe."""
+    def fold(n):
+        t, rot = n['tipo'], n.get('rotulo') or ''
+        liga = n.get('liga') or ''
+        rel = n.get('relacionado') or []
+        selo = ''.join(f'<span class="wsel">{esc(r)}</span>' for r in rel[:3])
+        meta = (f'<span class="wmeta">{esc(liga)}</span>' if liga else '') + (f'<span class="wmeta wact">ação {esc(n["acao"])}</span>' if n.get('acao') else '') + selo
+        cls = 'wn ' + ('wi' if n.get('direcao') == 'entrada' else 'wo' if n.get('direcao') == 'saída' else 'wx') + (' wr' if rel else '')
+        filhos = ''.join(fold(f) for f in n.get('filhos') or [])
+        if t == 'grade de layout':
+            return f'<div class="wgrid" style="grid-template-columns:repeat({max(int(n.get("colunas") or 1), 1)},minmax(0,1fr))">{filhos}</div>'
+        if t == 'listagem (tabela)':
+            cols = ''.join(f'<div class="wcol"><b>{esc(f.get("rotulo") or f.get("id") or "coluna")}</b>' + ''.join(f'<span class="wmeta">{esc(g.get("liga") or "")}</span>' + ''.join(f'<span class="wsel">{esc(r)}</span>' for r in (g.get("relacionado") or [])[:2]) for g in f.get('filhos') or []) + '</div>'
+                           for f in n.get('filhos') or [] if f['tipo'] == 'coluna da listagem')
+            resto = ''.join(fold(f) for f in n.get('filhos') or [] if f['tipo'] != 'coluna da listagem')
+            return f'<div class="wlist"><div class="wtt">listagem {esc(liga)}</div><div class="wcols">{cols}</div>{resto}</div>'
+        if t in ('caixa de texto', 'área de texto', 'calendário (data)', 'caixa de senha'):
+            return f'<div class="{cls}"><span class="wl">{esc(rot)}</span><span class="wbox">▭ {esc(t)}</span>{meta}</div>'
+        if t in ('combobox', 'seleção múltipla'):
+            return f'<div class="{cls}"><span class="wl">{esc(rot)}</span><span class="wbox">▾ {esc(t)}</span>{meta}{filhos}</div>'
+        if t in ('checkbox', 'radio'):
+            return f'<div class="{cls}"><span class="wl">{esc(rot)}</span><span class="wbox">{"☑" if t == "checkbox" else "◉"} {esc(t)}</span>{meta}</div>'
+        if t in ('botão', 'link'):
+            return f'<div class="{cls}"><span class="wbtn">{esc(rot or n.get("id") or t)}</span>{meta}</div>'
+        if t == 'rótulo / texto':
+            return f'<div class="{cls}"><span class="wtxt">{esc(rot or liga)}</span>{meta if liga else ""}</div>'
+        if t == 'mensagem':
+            return f'<div class="{cls}"><span class="wtxt">✉ mensagens</span></div>'
+        if t == 'abas / painel recolhível':
+            return f'<div class="wbox2"><div class="wtt">{esc(rot or n.get("id") or "abas")}</div>{filhos}</div>'
+        if filhos or liga or rot:
+            return f'<div class="wbox2">{(f"<div class=wtt>{esc(rot)}</div>" if rot else "")}{meta if liga else ""}{filhos}</div>'
+        return ''
+    corpo = ''.join(fold(n) for n in b.get('arvore') or [])
+    leg = '<p class="note">Borda azul = campo de entrada; verde = saída (exibição); selo cinza = relação com campo de transação (campo do processo, PIC, bytes e programa); tracejado = componente sem relação com as transações analisadas.</p>'
+    return f'<div class="wire">{corpo}</div>{leg}'
+
+
+def block(b):
+    t = b['type']
+    ttl = f'<h3>{esc(b["title"])}</h3>' if b.get('title') else ''
+    if t == 'text':
+        if b.get('sql'):
+            return ttl + f'<div class="sql {b["sql"]}">{_sql_html(b["text"])}</div>'
+        return ttl + f'<p>{esc(b["text"])}</p>'
+    if t == 'table':
+        return ttl + table(b)
+    if t == 'bars':
+        return ttl + bars(b)
+    if t == 'bands':
+        return ttl + bands(b)
+    if t == 'wire':
+        return ttl + wire(b) + (f'<p class="note">{esc(b["note"])}</p>' if b.get('note') else '')
+    if t == 'graph':
+        if not b.get('nodes'):
+            return ttl + '<p class="note">Nada a desenhar: o diagrama não tem nenhum nó neste código.</p>'
+        return ttl + (er(b) if b.get('kind') == 'er' else colunas(b) if b.get('kind') == 'colunas' else flowchart(b) if b.get('kind') == 'flowchart' else layered(b)) + (f'<p class="note">{esc(b["note"])}</p>' if b.get('note') else '')
+    raise ValueError(t)
+
+
+# Todas as etapas, na ordem do índice lateral (pasta, título): a lista é fixa para a página depender só do seu modelo.
+# SEM_RELATORIO: etapas sem página; aparecem no índice sem link. Etapas que esta análise não gerou (por exemplo, relatórios de IA sem interpretação,
+# ou cenários que não existem) entram em model['ausentes'] pela função reindexar() e também ficam sem link.
+SEM_RELATORIO = set()
+RELATORIOS = [('00-program-classification', 'Fase 0 — Classificação dos programas (Determinística)'), ('01-discovery-dependencies', 'Fase 1 — Dependências (Determinística)'), 
+              ('02-program-schema', 'Fase 2 — Esquema de programas (Determinística)'), ('03-data-schema', 'Fase 3 — Esquema de dados (Determinística)'), ('04-data-lineage', 'Fase 4 — Linhagem de dados (Determinística)'), ('04b-lineage-summary', 'Fase 4b — Resumo da linhagem (teste, Determinística)'), ('04c-feature-summary', 'Fase 4c — Funcionalidades: comandos SQL e chamadas (teste, Determinística)'), ('05-decision-map', 'Fase 5 — Mapa de decisões (Determinística)'), ('06-deterministic-rules', 'Fase 6 — Regras determinísticas (Determinística)'),
+              ('07-dynamic-analysis', 'Fase 7 — Análise dinâmica (Determinística)'), ('08-golden-cases', 'Fase 8 — Casos dourados (Determinística)'), ('09-certification', 'Fase 9 — Certificação (Determinística)'), ('10 - sql-mapping', 'Fase 10 — Mapeamento de comandos SQL (IA)'), ('11 - business-rules', 'Fase 11 — Regras de negócio (IA)'), ('12 - business-flows', 'Fase 12 — Funcionalidades e fluxos (IA)'), ('13 - traceability', 'Fase 13 — Rastreabilidade (IA)'), ('14 - pdc-mapping', 'Fase 14 — Processos PDC e programas (Determinística)')]
+
+# Comportamento do índice lateral: arrastar a barra muda a largura; o botão recolhe/expande; a escolha fica no navegador (sem ela, o padrão vale).
+SCRIPT = ('''(function(){var b=document.body,i=document.getElementById('idx'),r=document.getElementById('rz'),t=document.getElementById('tg'),k='idxw',c='idxc';\
+function g(n){try{return localStorage.getItem(n)}catch(e){return null}}function s(n,v){try{localStorage.setItem(n,v)}catch(e){}}\
+var w=g(k);if(w)b.style.setProperty('--w',w+'px');if(g(c)==='1')b.classList.add('nonav');\
+t.onclick=function(){if(window.innerWidth<=800){b.classList.toggle('shownav')}else{b.classList.toggle('nonav');s(c,b.classList.contains('nonav')?'1':'0')}};\
+r.onmousedown=function(e){e.preventDefault();r.classList.add('on');function m(ev){var v=Math.max(170,Math.min(ev.clientX,window.innerWidth*0.6));b.style.setProperty('--w',v+'px');s(k,Math.round(v))}\
+function u(){r.classList.remove('on');document.removeEventListener('mousemove',m);document.removeEventListener('mouseup',u)}document.addEventListener('mousemove',m);document.addEventListener('mouseup',u)};\
+})();''')
+
+
+IA = ('10 - sql-mapping', '11 - business-rules', '12 - business-flows', '13 - traceability')  # etapas escritas com apoio de IA; as demais são determinísticas
+
+
+def origem(fase):
+    """Rótulo do tipo de etapa mostrado ao lado do título da página."""
+    return '' if not fase else ('IA' if fase in IA else 'Determinística')
+
+
+def indice(model):
+    """Barra lateral: todos os relatórios (o atual destacado) e, abaixo dele, as seções do relatório atual."""
+    atual = model.get('phase') or ''
+    secoes = ''.join(f'<a href="#{esc(x["id"])}">{esc(x["title"])}</a>' for x in model['sections'])
+    rel = ''
+    for pasta, titulo in RELATORIOS:
+        if pasta in SEM_RELATORIO or pasta in model.get('ausentes', ()):
+            rel += f'<span class="off">{esc(titulo)} <small>(não gerado)</small></span>'
+        elif pasta == atual:
+            rel += f'<a class="cur" href="#">{esc(titulo)}</a><div class="sec">{secoes}</div>'
+        else:
+            rel += f'<a href="../../{quote(pasta)}/human/report.html">{esc(titulo)}</a>'
+    if atual not in dict(RELATORIOS):
+        rel += f'<h4>Seções</h4><div class="sec">{secoes}</div>'
+    return f'<aside id="idx"><h4>Relatórios</h4>{rel}</aside><div id="rz" title="Arraste para ajustar a largura"></div><button id="tg" type="button" title="Mostrar ou ocultar o índice">☰ índice</button>'
+
+
+def etiqueta(model):
+    o = origem(model.get('phase') or '')
+    return f'<span class="tag">{o}</span>' if o else ''
+
+
+def page(model):
+    _PHASE[0] = model.get('phase') or ''
+    cards = ''.join(f'<div class="card"><b>{esc(c["value"])}</b><span>{esc(c["label"])}</span></div>' for c in model.get('summary', []))
+    secs = ''.join(f'<h2 id="{esc(s["id"])}">{esc(s["title"])}</h2>' + (f'<p class="sub">{esc(s["text"])}</p>' if s.get('text') else '') + '<div class="secb">' + ''.join(block(b) for b in s['blocks']) + '</div>' for s in model['sections'])
+    return (f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{esc(model["title"])}</title><style>{CSS}</style></head><body>{indice(model)}<main><h1>{esc(model["title"])}</h1>{etiqueta(model)}'
+            f'<p class="sub">{esc(model.get("subtitle", ""))}</p><div class="cards">{cards}</div>{secs}</main><script>{SCRIPT}</script></body></html>')
+
+
+def counts(model):
+    """Contagens do que o HTML desenha; o teste compara com o que o JSON traz."""
+    c = {'sections': len(model['sections']), 'tables': 0, 'table_rows': 0, 'graphs': 0, 'nodes': 0, 'edges': 0, 'bars': 0, 'bar_rows': 0, 'texts': 0}
+    for s in model['sections']:
+        for b in s['blocks']:
+            t = b['type']
+            if t == 'table':
+                c['tables'] += 1
+                c['table_rows'] += len(b['rows'])
+            elif t == 'graph':
+                c['graphs'] += 1
+                c['nodes'] += len(b['nodes'])
+                c['edges'] += len(b['edges'])
+            elif t == 'bands':
+                c['bands'] = c.get('bands', 0) + 1
+            elif t == 'bars':
+                c['bars'] += 1
+                c['bar_rows'] += len(b['series'])
+            else:
+                c['texts'] += 1
+    return c
+
+
+def reindexar(saida):
+    """Depois de gerar as etapas, marca em cada relatório (JSON e HTML, do mesmo modelo) quais etapas do índice esta análise não gerou, para o índice
+    lateral não apontar para páginas que não existem. Sem ausências o modelo não muda."""
+    saida = Path(saida)
+    for f in sorted(saida.glob('*/ia/report.json')):
+        m = json.loads(f.read_text(encoding='utf-8'))
+        ausentes = [p for p, _t in RELATORIOS if p not in SEM_RELATORIO and not (saida / p / 'human' / 'report.html').exists()]
+        if ausentes:
+            m['ausentes'] = ausentes
+        else:
+            m.pop('ausentes', None)
+        f.write_text(json.dumps(m, indent=1, ensure_ascii=False, default=str), encoding='utf-8')
+        (f.parent.parent / 'human' / 'report.html').write_text(page(m), encoding='utf-8')
+
+
+# ----------------------------------------------------------------------------- referências cruzadas entre relatórios
+# Cada tipo de referência tem um relatório "dono" (a tabela ou seção em que ela é definida). Depois de gerar todos os relatórios, ligar() âncora as linhas
+# donas (row_ids) e transforma, em todas as tabelas de todos os relatórios, cada ocorrência do identificador num link para o dono. Tudo calculado dos
+# próprios relatórios: nenhum nome de programa, tabela ou regra é fixo no código.
+def _tabelas(m):
+    for s in m['sections']:
+        for b in s['blocks']:
+            if b['type'] == 'table':
+                yield b
+
+
+def _ancorar(b, chaves, prefixo, ancoras=None):
+    """Garante row_ids na tabela dona e devolve {chave da linha: âncora}."""
+    ids = b.get('row_ids') or []
+    out = {}
+    novos = []
+    for i, k in enumerate(chaves):
+        a = ids[i] if i < len(ids) and ids[i] else ((ancoras[i] if ancoras else prefixo + str(k)) if k not in (None, '') else '')
+        novos.append(a)
+        if k not in (None, '') and k not in out:
+            out[k] = a
+    b['row_ids'] = novos
+    return out
+
+
+def _coluna(b, nome):
+    return b['columns'].index(nome) if nome in b['columns'] else None
+
+
+def _texto(c):
+    return c['text'] if isinstance(c, dict) and 'text' in c else (c if isinstance(c, str) else str(c))
+
+
+def _registrar(modelos):
+    """{tipo: {chave: (fase, âncora)}} lendo os relatórios donos; marca com row_ids as linhas donas."""
+    reg = {'programa': {}, 'tabela': {}, 'copybook': {}, 'cenario': {}, 'decisao': {}, 'regra': {}}
+    m = modelos.get('00-program-classification')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'] == 'Programas' and _coluna(b, 'Programa') is not None:
+            c = _coluna(b, 'Programa')
+            for k, a in _ancorar(b, [_texto(r[c]) for r in b['rows']], 'programa-').items():
+                reg['programa'][k] = ('00-program-classification', a)
+    m = modelos.get('05-decision-map')
+    for sec in (m[1]['sections'] if m else ()):
+        if sec['id'].startswith('prog-'):
+            reg['programa'][sec['id'][5:]] = ('05-decision-map', sec['id'])   # todo link de programa aponta para o mapa de decisões do programa (quando ele tem)
+    m = modelos.get('03-data-schema')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'].startswith('Colunas por tabela') and _coluna(b, 'Tabela') is not None:
+            c = _coluna(b, 'Tabela')
+            ids, vistos = [], set()
+            for r in b['rows']:
+                t = _texto(r[c])
+                ids.append('' if t in vistos else 'tabela-' + t)
+                if t not in vistos:
+                    reg['tabela'][t] = ('03-data-schema', 'tabela-' + t)
+                vistos.add(t)
+            b['row_ids'] = ids
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'].startswith('Colunas deduzidas') and _coluna(b, 'Tabela') is not None:
+            c = _coluna(b, 'Tabela')
+            ids, vistos = [], set()
+            for r in b['rows']:
+                t = _texto(r[c])
+                novo = t not in vistos and t not in reg['tabela']
+                ids.append('tabela-' + t if novo else '')
+                if novo:
+                    reg['tabela'][t] = ('03-data-schema', 'tabela-' + t)
+                vistos.add(t)
+            b['row_ids'] = ids
+    m = modelos.get('04-data-lineage')
+    for sec in (m[1]['sections'] if m else ()):
+        if sec['id'].startswith('tab-'):
+            reg['tabela'].setdefault(sec['id'][4:], ('04-data-lineage', sec['id']))
+    m = modelos.get('02-program-schema')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'] == 'Copybooks: usados ou não' and _coluna(b, 'Copybook') is not None:
+            c = _coluna(b, 'Copybook')
+            for k, a in _ancorar(b, [_texto(r[c]) for r in b['rows']], 'copybook-').items():
+                reg['copybook'][k] = ('02-program-schema', a)
+    m = modelos.get('07-dynamic-analysis')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'] == 'Cenários' and _coluna(b, 'Cenário') is not None:
+            c = _coluna(b, 'Cenário')
+            for k, a in _ancorar(b, [_texto(r[c]) for r in b['rows']], 'cenario-' ).items():
+                reg['cenario'][k] = ('07-dynamic-analysis', a)
+            ids = b['row_ids']
+            b['row_ids'] = [f'cenario-{i + 1}' if x else '' for i, x in enumerate(ids)]
+            for i, r in enumerate(b['rows']):
+                reg['cenario'][_texto(r[c])] = ('07-dynamic-analysis', f'cenario-{i + 1}')
+    m = modelos.get('05-decision-map')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'].startswith('Mapa de decisão — ') and _coluna(b, 'Código') is not None:
+            prog = b['title'].split('— ', 1)[1].strip()
+            c = _coluna(b, 'Código')
+            for k, a in _ancorar(b, [_texto(r[c]).split(':')[-1] for r in b['rows']], f'decisao-{prog}-').items():
+                reg['decisao'][(prog, k)] = ('05-decision-map', a)
+    m = modelos.get('06-deterministic-rules')
+    for b in _tabelas(m[1]) if m else ():
+        if b['title'].startswith('Regras de ') and _coluna(b, 'Regra') is not None:
+            prog = b['title'][len('Regras de '):].strip()
+            c = _coluna(b, 'Regra')
+            for k, a in _ancorar(b, [_texto(r[c]) for r in b['rows']], f'regra-{prog}-').items():
+                reg['regra'][(prog, k)] = ('06-deterministic-rules', a)
+    return reg
+
+
+def _contexto(b, row, reg):
+    """Programa a que os códigos Dnnn e Rnnn da linha se referem: o do título da tabela ou o da coluna Programa."""
+    for pedaco in re.split(r'[\s—:,]+', b.get('title') or ''):
+        if pedaco in reg['programa']:
+            return pedaco
+    for n in ('Programa', 'Programas', 'Chamador', 'Programa chamador'):
+        c = _coluna(b, n)
+        if c is not None and _texto(row[c]).strip() in reg['programa']:
+            return _texto(row[c]).strip()
+    return None
+
+
+def _ligar_texto(t, fase, propria, ctx, reg, padrao):
+    """Pedaços [texto | link] de t, ou None se nada foi ligado. 'propria' é a âncora da linha dona (não liga a si mesma)."""
+    partes, pos, achou = [], 0, False
+    for m in padrao.finditer(t):
+        tok = m.group(0)
+        alvo = None
+        if m.group('rp'):
+            alvo = (reg['regra'] if m.group('rr')[0] == 'R' else reg['decisao']).get((m.group('rp'), m.group('rr')))
+        elif m.group('d'):
+            alvo = reg['decisao'].get((ctx, tok)) if ctx else None
+        elif m.group('r'):
+            alvo = reg['regra'].get((ctx, tok)) if ctx else None
+        else:
+            alvo = reg['programa'].get(tok) or reg['tabela'].get(tok) or reg['copybook'].get(tok)
+        if not alvo or (alvo[0] == fase and alvo[1] == propria):
+            continue
+        partes += [t[pos:m.start()], {'text': tok, 'phase': alvo[0], 'anchor': alvo[1]}]
+        pos, achou = m.end(), True
+    if not achou:
+        return None
+    partes.append(t[pos:])
+    return [p for p in partes if p != '']
+
+
+def ligar(saida):
+    """Liga todos os relatórios pelas referências cruzadas: programa, tabela DB2, copybook, decisão (Dnnn), regra determinística (Rnnn ou PROG:Rnnn) e cenário
+    viram link para o relatório que os define, em qualquer tabela de qualquer relatório. Reescreve JSON e HTML do mesmo modelo; rodar de novo não duplica nada."""
+    saida = Path(saida)
+    modelos = {}
+    for f in sorted(saida.glob('*/ia/report.json')):
+        modelos[f.parts[-3]] = (f, json.loads(f.read_text(encoding='utf-8')))
+    reg = _registrar(modelos)
+    nomes = sorted({*reg['programa'], *reg['tabela'], *reg['copybook']}, key=lambda n: -len(n))
+    progs = '|'.join(re.escape(p) for p in sorted(reg['programa'], key=lambda n: -len(n))) or '(?!x)x'
+    alt = '|'.join(re.escape(n) for n in nomes) or '(?!x)x'
+    padrao = re.compile(rf'(?<![\w-])(?:(?P<rp>{progs}):(?P<rr>[RDE]\d{{3}})\b|(?P<d>D\d{{3}})\b|(?P<r>R\d{{3}})\b|(?:{alt})(?![\w-]))')
+    total = 0
+    for fase, (f, m) in modelos.items():
+        for b in _tabelas(m):
+            ids = b.get('row_ids') or []
+            for i, row in enumerate(b['rows']):
+                ctx = _contexto(b, row, reg)
+                propria = ids[i] if i < len(ids) else ''
+                for j, c in enumerate(row):
+                    if not isinstance(c, str) or len(c) < 4:
+                        continue
+                    ex = reg['cenario'].get(c)
+                    if ex and not (ex[0] == fase and ex[1] == propria):
+                        row[j] = {'text': c, 'parts': [{'text': c, 'phase': ex[0], 'anchor': ex[1]}]}
+                        total += 1
+                        continue
+                    ps = _ligar_texto(c, fase, propria, ctx, reg, padrao)
+                    if ps:
+                        row[j] = {'text': c, 'parts': ps}
+                        total += 1
+    for fase, (f, m) in modelos.items():
+        f.write_text(json.dumps(m, indent=1, ensure_ascii=False, default=str), encoding='utf-8')
+        (f.parent.parent / 'human' / 'report.html').write_text(page(m), encoding='utf-8')
+    return total

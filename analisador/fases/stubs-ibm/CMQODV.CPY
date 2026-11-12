@@ -1,0 +1,2 @@
+           10 MQOD-OBJECTTYPE          PIC S9(9) BINARY VALUE 1.
+           10 MQOD-OBJECTNAME          PIC X(48) VALUE SPACES.

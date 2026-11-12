@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -e
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+uso() {
+  echo "uso:"
+  echo "  mainframe-analyzer certify <fontes-ou-zip> [saida]            análise completa e certificação"
+  echo "  mainframe-analyzer run     <fontes> <cenarios> [saida] [--rapido]  análise + runtime dos cenários x análise estática"
+  echo "  mainframe-analyzer modelo  <fontes> [PROGRAMA|entry-points] [saida]  gera cenários-modelo"
+  echo "  mainframe-analyzer dclgen  <fontes>                          cobertura do parser de DCLGEN"
+  exit 2
+}
+[ -z "$2" ] && uso
+case "$1" in
+  certify) exec python3 "$ROOT/tools/certify_from_zero.py" "$2" "${3:-$ROOT/certification-output}" ;;
+  run)     shift; exec python3 "$ROOT/tools/run_scenarios.py" "$@" ;;
+  modelo)  exec python3 "$ROOT/tools/run_scenarios.py" "$2" --modelo "${3:-entry-points}" "${4:-$ROOT/runtime-output}" ;;
+  dclgen)  exec python3 "$ROOT/tools/dclgen_report.py" "$2" ;;
+  *) uso ;;
+esac
